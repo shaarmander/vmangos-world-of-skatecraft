@@ -1003,7 +1003,7 @@ index 00000000..0633a0a1
 +if errorlevel 1 pause
 diff --git a/tools/test-skate-multiplayer.ps1 b/tools/test-skate-multiplayer.ps1
 new file mode 100644
-index 00000000..fa4fd811
+index 00000000..157b12ae
 --- /dev/null
 +++ b/tools/test-skate-multiplayer.ps1
 @@ -0,0 +1,61 @@
@@ -1058,7 +1058,7 @@ index 00000000..fa4fd811
 +        $env:WOW_PROBE_KEY = 'J@32;J@38'
 +    } else {
 +        foreach ($name in @('WOW_UNATTENDED','WOW_NOSOUND','WOW_SKATE_AUTOSTART','WOW_SKATE_PROBE','WOW_PROBE_EXIT_AT','WOW_LIVE_SHOT','WOW_LIVE_SHOT_AT','WOW_LIVE_SHOT_COUNT','WOW_LIVE_SHOT_EVERY','WOW_PROBE_CAM','WOW_PROBE_KEY')) {
-+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
++            Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
 +        }
 +    }
 +    $process = Start-Process -FilePath (Join-Path $runDirectory 'benilla.exe') -WorkingDirectory $clientRoot -PassThru `
