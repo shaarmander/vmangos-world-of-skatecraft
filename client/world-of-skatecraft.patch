@@ -1,0 +1,1070 @@
+diff --git a/crates/benilla-app/src/addon_harness/render_tests.rs b/crates/benilla-app/src/addon_harness/render_tests.rs
+index f222c5b8..c5bdde60 100644
+--- a/crates/benilla-app/src/addon_harness/render_tests.rs
++++ b/crates/benilla-app/src/addon_harness/render_tests.rs
+@@ -148,7 +148,10 @@ fn omnicc_and_bagnon_come_out_on_opposite_sides() {
+     // Symlinked into a small root: the full corpus sweep is the `addon_harness` example's job.
+     let fx = Fixtures::new("oracle");
+     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
++        #[cfg(unix)]
+         std::os::unix::fs::symlink(corpus.join(name), fx.root().join(name)).unwrap();
++        #[cfg(windows)]
++        std::os::windows::fs::symlink_dir(corpus.join(name), fx.root().join(name)).unwrap();
+     }
+     let reports = survey(fx.root());
+     let row = |name: &str| {
+diff --git a/crates/benilla-app/src/addon_harness/use_probe_tests.rs b/crates/benilla-app/src/addon_harness/use_probe_tests.rs
+index baf4b953..0a90b8a2 100644
+--- a/crates/benilla-app/src/addon_harness/use_probe_tests.rs
++++ b/crates/benilla-app/src/addon_harness/use_probe_tests.rs
+@@ -208,7 +208,10 @@ fn bagnon_is_reachable_and_omnicc_is_not_broken() {
+     let corpus = benilla_formats::addon_corpus_or_skip!();
+     let fx = Fixtures::new("oracle");
+     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
++        #[cfg(unix)]
+         std::os::unix::fs::symlink(corpus.join(name), fx.root().join(name)).unwrap();
++        #[cfg(windows)]
++        std::os::windows::fs::symlink_dir(corpus.join(name), fx.root().join(name)).unwrap();
+     }
+     let reports = survey(fx.root());
+     let row = |name: &str| {
+diff --git a/crates/benilla-app/src/capture/probes/act.rs b/crates/benilla-app/src/capture/probes/act.rs
+index bfad967f..23434576 100644
+--- a/crates/benilla-app/src/capture/probes/act.rs
++++ b/crates/benilla-app/src/capture/probes/act.rs
+@@ -130,6 +130,8 @@ const PROBE_KEY_TAP_SECS: f32 = 0.25;
+ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
+     Some(match name {
+         "Space" => KeyCode::Space,
++        "J" => KeyCode::KeyJ,
++        "K" => KeyCode::KeyK,
+         "W" => KeyCode::KeyW,
+         "A" => KeyCode::KeyA,
+         "S" => KeyCode::KeyS,
+diff --git a/crates/benilla-app/src/net.rs b/crates/benilla-app/src/net.rs
+index ac22edc0..8dc5bfdb 100644
+--- a/crates/benilla-app/src/net.rs
++++ b/crates/benilla-app/src/net.rs
+@@ -754,6 +754,7 @@ pub(crate) static CAST_TRACE: std::sync::LazyLock<bool> =
+ /// A message to the server through the write thread, carrying any pose it needs.
+ #[derive(Debug)]
+ pub(crate) enum ClientCommand {
++    Skate(benilla_protocol::skate::Frame),
+     /// A self-movement packet. Each tail is written iff its flag is set (`JUMPING`, `SWIMMING`,
+     /// `ON_TRANSPORT`): a flag without its tail desyncs the server's parse.
+     Move {
+diff --git a/crates/benilla-app/src/net/io.rs b/crates/benilla-app/src/net/io.rs
+index 869b97c4..f26d50c5 100644
+--- a/crates/benilla-app/src/net/io.rs
++++ b/crates/benilla-app/src/net/io.rs
+@@ -852,6 +852,7 @@ fn writer_loop(
+                     continue;
+                 };
+                 let result = match cmd {
++                    ClientCommand::Skate(frame) => w.skate(&frame),
+                     ClientCommand::Move {
+                         kind,
+                         flags,
+diff --git a/crates/benilla-app/src/player/controller.rs b/crates/benilla-app/src/player/controller.rs
+index bfb40ef9..a1c120ea 100644
+--- a/crates/benilla-app/src/player/controller.rs
++++ b/crates/benilla-app/src/player/controller.rs
+@@ -838,7 +838,7 @@ pub(super) fn control(
+ }
+ 
+ /// A riding frame: the skater's pose is the body's, and the wire carries it as a
+-/// run, FORWARD while the board rolls, with heartbeats every 500 ms. No FALLING is ever sent, so
++/// run, FORWARD while the board rolls, with heartbeats every 50 ms. No FALLING is ever sent, so
+ /// a drop off a ledge takes no fall damage.
+ #[allow(clippy::too_many_arguments)]
+ fn drive_skating(
+@@ -860,6 +860,12 @@ fn drive_skating(
+         t.translation = player.pos;
+         t.rotation = Quat::from_rotation_y(player.model_yaw);
+     }
++    // Physics heading jitters even at rest. Sending SET_FACING at render frequency can
++    // exceed VMaNGOS's queued-packet flood limit. Coalesce the ordinary mover stream to
++    // the same 20 Hz as poses, while servicing forced speed acknowledgments immediately.
++    if time.elapsed_secs() - player.last_heartbeat < 0.05 && speed_acks.is_empty() {
++        return;
++    }
+     let flags = if drive.moving() {
+         crate::creature_anim::move_flags::FORWARD
+     } else {
+@@ -887,4 +893,19 @@ fn drive_skating(
+             mover: player.foreign_mover.or(self_guid),
+         },
+     );
++    // Keep the server's spatial visibility position current even on a stationary airborne
++    // pose. Ordinary walking retains its stock 500 ms cadence in movement_net.
++    if time.elapsed_secs() - player.last_heartbeat >= 0.05 {
++        let _ = sender.send(crate::net::ClientCommand::Move {
++            kind: crate::net::MoveKind::Heartbeat,
++            flags,
++            pos: benilla_assets::coords::bevy_to_wow(player.pos),
++            orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
++            pitch: 0.0,
++            fall_time: 0,
++            jump: None,
++            transport: None,
++        });
++        player.last_heartbeat = time.elapsed_secs();
++    }
+ }
+diff --git a/crates/benilla-app/src/skate/board.rs b/crates/benilla-app/src/skate/board.rs
+index 8bf4e51a..57ab8dae 100644
+--- a/crates/benilla-app/src/skate/board.rs
++++ b/crates/benilla-app/src/skate/board.rs
+@@ -71,6 +71,7 @@ pub(super) struct BoardPart;
+ #[derive(Resource, Default)]
+ pub(super) struct Board {
+     parts: Vec<(Entity, Handle<Mesh>)>,
++    remote: std::collections::HashMap<Entity, Vec<(Entity, Handle<Mesh>)>>,
+ }
+ 
+ fn spawn(
+@@ -149,6 +150,7 @@ fn spawn(
+ /// Skins the board to this frame's skater pose, or hides it off the board.
+ pub(super) fn update(
+     pose: Res<SkatePose>,
++    remote: Query<(Entity, &super::network::RemoteSkate)>,
+     mut board: ResMut<Board>,
+     mut commands: Commands,
+     mut meshes: ResMut<Assets<Mesh>>,
+@@ -159,15 +161,16 @@ pub(super) fn update(
+     let Some(model) = model() else {
+         return;
+     };
+-    if !pose.active {
+-        for (entity, _) in &board.parts {
+-            if let Ok((_, mut v)) = parts.get_mut(*entity) {
+-                *v = Visibility::Hidden;
++    for (entity, meshes_for_peer) in &board.remote {
++        if remote.get(*entity).is_err() {
++            for (part, handle) in meshes_for_peer {
++                commands.entity(*part).despawn();
++                meshes.remove(handle.id());
+             }
+         }
+-        return;
+     }
+-    if board.parts.is_empty() {
++    board.remote.retain(|e, _| remote.get(*e).is_ok());
++    if pose.active && board.parts.is_empty() {
+         board.parts = spawn(
+             model,
+             &mut commands,
+@@ -175,6 +178,35 @@ pub(super) fn update(
+             &mut materials,
+             &mut images,
+         );
++    }
++    skin(&pose, model, &board.parts, &mut meshes, &mut parts);
++    for (entity, remote_pose) in &remote {
++        let peer_parts = board.remote.entry(entity).or_insert_with(|| {
++            spawn(
++                model,
++                &mut commands,
++                &mut meshes,
++                &mut materials,
++                &mut images,
++            )
++        });
++        skin(&remote_pose.0, model, peer_parts, &mut meshes, &mut parts);
++    }
++}
++
++fn skin(
++    pose: &SkatePose,
++    model: &Model,
++    board_parts: &[(Entity, Handle<Mesh>)],
++    meshes: &mut Assets<Mesh>,
++    parts: &mut Query<(&mut Transform, &mut Visibility), With<BoardPart>>,
++) {
++    if !pose.active {
++        for (entity, _) in board_parts {
++            if let Ok((_, mut v)) = parts.get_mut(*entity) {
++                *v = Visibility::Hidden;
++            }
++        }
+         return;
+     }
+     let Some(reference) = reference() else {
+@@ -200,7 +232,7 @@ pub(super) fn update(
+     let anchor = pose.bone("SKATEBOARD_ROOT").map_or(pose.origin, |m| {
+         from_skate(m.w_axis.truncate(), pose.origin)
+     });
+-    for (surface, (entity, handle)) in model.surfaces.iter().zip(&board.parts) {
++    for (surface, (entity, handle)) in model.surfaces.iter().zip(board_parts) {
+         let Some(mesh) = meshes.get_mut(handle) else {
+             continue;
+         };
+diff --git a/crates/benilla-app/src/skate/mod.rs b/crates/benilla-app/src/skate/mod.rs
+index 50e9a755..a7cf81c3 100644
+--- a/crates/benilla-app/src/skate/mod.rs
++++ b/crates/benilla-app/src/skate/mod.rs
+@@ -6,6 +6,7 @@
+ 
+ mod board;
+ mod export;
++mod network;
+ mod rails;
+ mod rig;
+ mod sound;
+@@ -85,7 +86,7 @@ impl SkateDrive {
+ 
+ /// The skater's latest solved skeleton, for the retarget and the board: bones relative to the
+ /// skater's root, the root in engine space (meters from `origin`).
+-#[derive(Resource, Default)]
++#[derive(Resource, Default, Clone)]
+ pub(crate) struct SkatePose {
+     pub(crate) active: bool,
+     pub(crate) origin: Vec3,
+@@ -230,6 +231,9 @@ fn run_worker(
+     let mut builds: Option<mpsc::Sender<(u64, Vec<Tri>)>> = None;
+     let mut epoch = 0;
+     let mut accumulated = 0.0;
++    let probe =
++        crate::run_mode::unattended() && std::env::var("WOW_SKATE_PROBE").is_ok_and(|v| v == "1");
++    let mut probe_tick = 0u64;
+     while let Ok(job) = jobs.recv() {
+         match job {
+             Job::Activate {
+@@ -241,6 +245,7 @@ fn run_worker(
+             } => {
+                 epoch = e;
+                 accumulated = 0.0;
++                probe_tick = 0;
+                 let start = std::time::Instant::now();
+                 let rails = find_rails(&triangles);
+                 let s = match session.as_mut() {
+@@ -315,7 +320,24 @@ fn run_worker(
+                 // The engine's camera can change the simulation period.
+                 while accumulated >= s.period() {
+                     accumulated -= s.period();
+-                    s.advance()?;
++                    if probe {
++                        let mut controls = skate_host::bridge::Controls::default();
++                        // Push twice, crouch and release for an ollie; repeat without combat.
++                        let phase = probe_tick % 600;
++                        if (120..240).contains(&phase) {
++                            controls.buttons = 0x1000;
++                        }
++                        if (260..290).contains(&phase) {
++                            controls.right[1] = -30000;
++                        }
++                        if (290..295).contains(&phase) {
++                            controls.right[1] = 30000;
++                        }
++                        s.tick(controls)?;
++                        probe_tick += 1;
++                    } else {
++                        s.advance()?;
++                    }
+                     advanced = true;
+                 }
+                 if advanced {
+@@ -651,6 +673,7 @@ fn start(
+ }
+ 
+ pub(crate) fn plugin(app: &mut App) {
++    network::plugin(app);
+     app.init_resource::<Host>()
+         .init_resource::<SkateDrive>()
+         .init_resource::<SkatePose>()
+@@ -659,7 +682,7 @@ pub(crate) fn plugin(app: &mut App) {
+         .add_systems(Startup, preload)
+         .add_systems(
+             Update,
+-            (update, board::update, sound::update)
++            (update, network::update, board::update, sound::update)
+                 .chain()
+                 .in_set(WorldStage::Input)
+                 .before(crate::player::PlayerControlSet)
+@@ -669,7 +692,8 @@ pub(crate) fn plugin(app: &mut App) {
+             PostUpdate,
+             // The last writer of our pose: after the body twist, which would turn the retargeted
+             // spine and head again, the global sequences and the terrain conform.
+-            rig::retarget
++            (network::place, rig::retarget)
++                .chain()
+                 .in_set(benilla_world::rig_anim::PosePost)
+                 .after(crate::creature_anim::apply_body_twist)
+                 .after(benilla_world::rig_anim::apply_global_sequences)
+diff --git a/crates/benilla-app/src/skate/network.rs b/crates/benilla-app/src/skate/network.rs
+new file mode 100644
+index 00000000..0a52608e
+--- /dev/null
++++ b/crates/benilla-app/src/skate/network.rs
+@@ -0,0 +1,286 @@
++//! Authenticated pose replication at 20 Hz, rendered 100 ms behind arrival.
++use super::{SkatePose, METERS_PER_YARD};
++use crate::net::{ClientCommand, GuidIndex, NetCommands, NetHandlerApp, SelfGuid};
++use benilla_protocol::{skate as wire, SessionEvent, SessionEventKind};
++use benilla_world::world_map::CurrentMap;
++use bevy::prelude::*;
++use std::collections::{HashMap, VecDeque};
++
++#[derive(Component)]
++pub(super) struct RemoteSkate(pub SkatePose);
++
++struct Peer {
++    sequence: u32,
++    frames: VecDeque<(f32, SkatePose)>,
++}
++
++#[derive(Resource, Default)]
++pub(super) struct Replication {
++    identity: Option<(u64, u32)>,
++    ready: bool,
++    sequence: u32,
++    sent_at: f32,
++    was_active: bool,
++    peers: HashMap<u64, Peer>,
++    received: u64,
++}
++
++fn pack(m: Mat4) -> wire::Transform {
++    let (scale, rotation, position) = m.to_scale_rotation_translation();
++    wire::Transform {
++        position: position.to_array(),
++        rotation: rotation.normalize().to_array(),
++        scale: scale.to_array(),
++    }
++}
++fn unpack(t: &wire::Transform) -> Mat4 {
++    Mat4::from_scale_rotation_translation(
++        Vec3::from_array(t.scale),
++        Quat::from_array(t.rotation).normalize(),
++        Vec3::from_array(t.position),
++    )
++}
++
++fn receive(In(ev): In<SessionEvent>, time: Res<Time>, mut state: ResMut<Replication>) {
++    let SessionEvent::Skate { guid, frame } = ev else {
++        return;
++    };
++    if guid == 0 && frame.kind == 0 {
++        if state.identity.is_some_and(|(_, map)| map == frame.map) {
++            state.ready = true;
++            info!("skate multiplayer: protocol v1 accepted");
++        }
++        return;
++    }
++    if !state.ready
++        || !state
++            .identity
++            .is_some_and(|(own, map)| own != guid && map == frame.map)
++    {
++        return;
++    }
++    if frame.kind == 2 {
++        state.peers.remove(&guid);
++        return;
++    }
++    let Some(p) = frame.pose else {
++        return;
++    };
++    let peer = state.peers.entry(guid).or_insert_with(|| Peer {
++        sequence: 0,
++        frames: VecDeque::new(),
++    });
++    if frame.sequence <= peer.sequence {
++        return;
++    }
++    peer.sequence = frame.sequence;
++    peer.frames.push_back((
++        time.elapsed_secs(),
++        SkatePose {
++            active: true,
++            origin: Vec3::from_array(p.origin),
++            root: unpack(&p.root),
++            bones: p.bones.iter().map(|(_, t)| unpack(t)).collect(),
++            names: p.bones.into_iter().map(|(n, _)| n).collect(),
++        },
++    ));
++    while peer.frames.len() > 8 {
++        peer.frames.pop_front();
++    }
++    state.received += 1;
++    if state.received == 1 || state.received.is_multiple_of(100) {
++        info!(
++            "skate multiplayer: received {} poses, latest peer={guid}",
++            state.received
++        );
++    }
++}
++
++fn blend(a: Mat4, b: Mat4, t: f32) -> Mat4 {
++    let (sa, qa, pa) = a.to_scale_rotation_translation();
++    let (sb, qb, pb) = b.to_scale_rotation_translation();
++    Mat4::from_scale_rotation_translation(sa.lerp(sb, t), qa.slerp(qb, t), pa.lerp(pb, t))
++}
++fn sample(frames: &VecDeque<(f32, SkatePose)>, at: f32) -> Option<SkatePose> {
++    let mut before = frames.front()?;
++    for after in frames.iter().skip(1) {
++        if after.0 >= at {
++            if before.1.names != after.1.names || before.1.origin != after.1.origin {
++                return Some(after.1.clone());
++            }
++            let t = ((at - before.0) / (after.0 - before.0).max(0.001)).clamp(0.0, 1.0);
++            let mut p = after.1.clone();
++            p.root = blend(before.1.root, after.1.root, t);
++            for (out, a) in p.bones.iter_mut().zip(&before.1.bones) {
++                *out = blend(*a, *out, t);
++            }
++            return Some(p);
++        }
++        before = after;
++    }
++    Some(before.1.clone())
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(super) fn update(
++    time: Res<Time>,
++    pose: Res<SkatePose>,
++    player: Res<crate::player::Player>,
++    own: Res<SelfGuid>,
++    map: Option<Res<CurrentMap>>,
++    net: Res<NetCommands>,
++    index: Res<GuidIndex>,
++    mut state: ResMut<Replication>,
++    mut commands: Commands,
++    existing: Query<Entity, With<RemoteSkate>>,
++) {
++    let now = time.elapsed_secs();
++    let identity = own
++        .0
++        .zip(map.as_ref().map(|m| m.0))
++        .filter(|_| player.active);
++    if state.identity != identity {
++        *state = Replication {
++            identity,
++            ..default()
++        };
++        if let Some((_, map)) = identity {
++            // Opt in explicitly: this opcode is not part of stock WoW.
++            if std::env::var("WOW_SKATE_MULTIPLAYER").is_ok_and(|v| v == "1") {
++                let _ = net.0.send(ClientCommand::Skate(wire::Frame {
++                    kind: 0,
++                    sequence: 0,
++                    map,
++                    pose: None,
++                }));
++            }
++        }
++    }
++    if state.ready && (pose.active || state.was_active) && now - state.sent_at >= 0.05 {
++        state.sequence = state.sequence.wrapping_add(1);
++        let frame = wire::Frame {
++            kind: if pose.active { 1 } else { 2 },
++            sequence: state.sequence,
++            map: identity.unwrap().1,
++            pose: pose.active.then(|| wire::Pose {
++                origin: pose.origin.to_array(),
++                root: pack(pose.root),
++                bones: pose
++                    .names
++                    .iter()
++                    .cloned()
++                    .zip(pose.bones.iter().copied().map(pack))
++                    .collect(),
++            }),
++        };
++        match frame.encode() {
++            Ok(_) => {
++                let _ = net.0.send(ClientCommand::Skate(frame));
++            }
++            Err(e) => {
++                bevy::log::warn_once!("skate multiplayer: cannot encode local pose: {e}");
++            }
++        }
++        state.sent_at = now;
++        state.was_active = pose.active;
++    }
++    state.peers.retain(|guid, peer| {
++        index.0.contains_key(guid) && peer.frames.back().is_some_and(|(t, _)| now - t < 1.0)
++    });
++    let mut active = std::collections::HashSet::new();
++    for (guid, peer) in &state.peers {
++        if let (Some(entity), Some(pose)) = (index.0.get(guid), sample(&peer.frames, now - 0.1)) {
++            active.insert(*entity);
++            commands.entity(*entity).insert(RemoteSkate(pose));
++        }
++    }
++    for entity in &existing {
++        if !active.contains(&entity) {
++            commands.entity(entity).remove::<RemoteSkate>();
++        }
++    }
++}
++
++// Normal WoW movement may extrapolate while the skater is still in the air. The pose's
++// root wins for remote rendering; the server's movement remains the gameplay position.
++pub(super) fn place(mut units: Query<(&RemoteSkate, &mut Transform)>) {
++    for (pose, mut transform) in &mut units {
++        transform.translation = pose.0.origin + pose.0.root.w_axis.truncate() / METERS_PER_YARD;
++    }
++}
++
++pub(super) fn plugin(app: &mut App) {
++    app.add_systems(
++        Update,
++        reset_on_transition.before(benilla_world::schedule::WorldStage::Input),
++    )
++    .init_resource::<Replication>()
++    .net_handler(SessionEventKind::Skate, receive);
++}
++
++/// Reset even while the in-world update set is gated off (logout, loading, reconnect).
++fn reset_on_transition(
++    mut disconnected: MessageReader<crate::net::DisconnectedMessage>,
++    mut logged_out: MessageReader<crate::net::LoggedOutMessage>,
++    mut teleports: MessageReader<crate::net::TeleportMessage>,
++    mut worldports: MessageReader<crate::net::WorldportMessage>,
++    mut state: ResMut<Replication>,
++    mut host: ResMut<super::Host>,
++    mut drive: ResMut<super::SkateDrive>,
++    mut pose: ResMut<SkatePose>,
++    peers: Query<Entity, With<RemoteSkate>>,
++    mut commands: Commands,
++) {
++    let reset = disconnected.read().count()
++        + logged_out.read().count()
++        + teleports.read().count()
++        + worldports.read().count()
++        > 0;
++    if reset {
++        *state = Replication::default();
++        super::stop(&mut host, &mut drive, &mut pose);
++        for e in &peers {
++            commands.entity(e).remove::<RemoteSkate>();
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn samples_between_packets_and_holds_at_the_edges() {
++        let a = SkatePose {
++            active: true,
++            root: Mat4::IDENTITY,
++            bones: vec![Mat4::IDENTITY],
++            names: vec!["HIPS".into()],
++            ..default()
++        };
++        let mut b = a.clone();
++        b.root = Mat4::from_translation(Vec3::X * 10.0);
++        b.bones[0] = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
++        let frames = VecDeque::from([(1.0, a), (1.1, b)]);
++        let mid = sample(&frames, 1.05).unwrap();
++        assert!((mid.root.w_axis.x - 5.0).abs() < 0.001);
++        let direction = mid.bones[0].transform_vector3(Vec3::Z);
++        assert!((direction.x - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.001);
++        assert_eq!(sample(&frames, 0.0).unwrap().root.w_axis.x, 0.0);
++        assert_eq!(sample(&frames, 2.0).unwrap().root.w_axis.x, 10.0);
++    }
++
++    #[test]
++    fn a_new_origin_is_not_blended_through_the_old_world_space() {
++        let a = SkatePose {
++            root: Mat4::IDENTITY,
++            ..default()
++        };
++        let b = SkatePose {
++            origin: Vec3::X * 1000.0,
++            ..a.clone()
++        };
++        let frames = VecDeque::from([(1.0, a), (1.1, b)]);
++        assert_eq!(sample(&frames, 1.05).unwrap().origin.x, 1000.0);
++    }
++}
+diff --git a/crates/benilla-app/src/skate/rig.rs b/crates/benilla-app/src/skate/rig.rs
+index 450ea8d5..1100e321 100644
+--- a/crates/benilla-app/src/skate/rig.rs
++++ b/crates/benilla-app/src/skate/rig.rs
+@@ -294,20 +294,42 @@ impl Plan {
+ #[allow(clippy::type_complexity)]
+ pub(super) fn retarget(
+     pose: Res<SkatePose>,
+-    mut plan: Local<Plan>,
+-    mut held: Local<Held>,
+-    mut units: Query<(&Transform, &GlobalTransform, &mut RigPose), With<crate::net::Embodied>>,
++    mut plans: Local<std::collections::HashMap<Entity, (Plan, Held)>>,
++    mut units: Query<(
++        Entity,
++        &Transform,
++        &GlobalTransform,
++        &mut RigPose,
++        Option<&crate::net::Embodied>,
++        Option<&super::network::RemoteSkate>,
++    )>,
+     globals: Query<&GlobalTransform>,
+ ) {
+-    if !pose.active || pose.bones.is_empty() {
+-        held.rotations.clear();
+-        return;
++    plans.retain(|e, _| units.contains(*e));
++    for (entity, unit_t, unit_g, mut rig, own, remote) in &mut units {
++        let source = if own.is_some() {
++            Some(&*pose)
++        } else {
++            remote.map(|p| &p.0)
++        };
++        let Some(source) = source.filter(|p| p.active && !p.bones.is_empty()) else {
++            plans.remove(&entity);
++            continue;
++        };
++        let (plan, held) = plans.entry(entity).or_default();
++        apply(source, plan, held, unit_t, unit_g, &mut rig, &globals);
+     }
+-    let count = units.iter().count();
+-    let Ok((unit_t, unit_g, mut rig)) = units.single_mut() else {
+-        debug_once(&format!("no single embodied rig ({count})"));
+-        return;
+-    };
++}
++
++fn apply(
++    pose: &SkatePose,
++    plan: &mut Plan,
++    held: &mut Held,
++    unit_t: &Transform,
++    unit_g: &GlobalTransform,
++    rig: &mut RigPose,
++    globals: &Query<&GlobalTransform>,
++) {
+     if rig.key_bones.is_empty() {
+         debug_once("rig has no key bones");
+         return;
+@@ -321,7 +343,7 @@ pub(super) fn retarget(
+     let offset = unit_g.affine().inverse() * frame_g.affine();
+     let model_from_world = Mat4::from(unit_t.compute_affine() * offset).inverse();
+ 
+-    let plan = plan.for_rig(&rig);
++    let plan = plan.for_rig(rig);
+     let n = plan.pivots.len();
+     if rig.locals.len() != n {
+         debug_once("locals/pivots length mismatch");
+diff --git a/crates/benilla-protocol/src/events.rs b/crates/benilla-protocol/src/events.rs
+index 6a1a0d2f..b6de3a3f 100644
+--- a/crates/benilla-protocol/src/events.rs
++++ b/crates/benilla-protocol/src/events.rs
+@@ -110,6 +110,10 @@ impl LoginRefusal {
+     derive(Hash, PartialOrd, Ord, strum::EnumIter, strum::IntoStaticStr)
+ )]
+ pub enum SessionEvent {
++    Skate {
++        guid: u64,
++        frame: crate::skate::Frame,
++    },
+     /// A login attempt reached `stage`; emitted by the IO thread, never wire-decoded.
+     LoginStage { stage: LoginStage },
+     /// The account's realms (`CMD_REALM_LIST`); the IO thread blocks for the app's pick. Re-sent on
+diff --git a/crates/benilla-protocol/src/events/decode.rs b/crates/benilla-protocol/src/events/decode.rs
+index 35f66cf1..191faa4f 100644
+--- a/crates/benilla-protocol/src/events/decode.rs
++++ b/crates/benilla-protocol/src/events/decode.rs
+@@ -920,6 +920,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
+         ServerPacket::Inspect { .. } => Vec::new(),
+         ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
+         ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
++        ServerPacket::Skate { guid, frame } => vec![SessionEvent::Skate { guid, frame }],
+         ServerPacket::Pong { sequence } => vec![SessionEvent::Pong { sequence }],
+         ServerPacket::ForceSpeedChange {
+             guid,
+diff --git a/crates/benilla-protocol/src/lib.rs b/crates/benilla-protocol/src/lib.rs
+index 985b73c8..32f47d01 100644
+--- a/crates/benilla-protocol/src/lib.rs
++++ b/crates/benilla-protocol/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod auth;
+ pub mod events;
+ pub mod guid;
+ pub mod messages;
++pub mod skate;
+ pub mod wire;
+ pub mod world;
+ pub use auth::AuthReject;
+diff --git a/crates/benilla-protocol/src/messages/packet.rs b/crates/benilla-protocol/src/messages/packet.rs
+index d0aae26e..0fc356ba 100644
+--- a/crates/benilla-protocol/src/messages/packet.rs
++++ b/crates/benilla-protocol/src/messages/packet.rs
+@@ -60,6 +60,10 @@ pub struct CreatureQueryInfo {
+ 
+ /// A decoded server packet; an unmodelled opcode is [`Self::Other`].
+ pub enum ServerPacket {
++    Skate {
++        guid: u64,
++        frame: crate::skate::Frame,
++    },
+     AuthChallenge {
+         server_seed: u32,
+     },
+@@ -1510,6 +1514,7 @@ impl ServerPacket {
+             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),
+             ServerPacket::LogoutResponse { .. } => "SMSG_LOGOUT_RESPONSE".into(),
+             ServerPacket::LogoutCancelAck => "SMSG_LOGOUT_CANCEL_ACK".into(),
++            ServerPacket::Skate { .. } => "SMSG_SKATE".into(),
+             ServerPacket::Pong { .. } => "SMSG_PONG".into(),
+             ServerPacket::ForceSpeedChange { kind, .. } => {
+                 format!("SMSG_FORCE_{kind:?}_SPEED_CHANGE")
+diff --git a/crates/benilla-protocol/src/messages/parse.rs b/crates/benilla-protocol/src/messages/parse.rs
+index 4419af05..c9e0a945 100644
+--- a/crates/benilla-protocol/src/messages/parse.rs
++++ b/crates/benilla-protocol/src/messages/parse.rs
+@@ -1228,6 +1228,12 @@ fn parse_server_body(
+             instant: read_u8(&mut r)? != 0,
+         },
+         opcode::SMSG_LOGOUT_CANCEL_ACK => ServerPacket::LogoutCancelAck,
++        crate::skate::SMSG_SKATE => {
++            let guid = read_u64_le(&mut r)?;
++            let frame = crate::skate::Frame::decode(r)?;
++            r = &[];
++            ServerPacket::Skate { guid, frame }
++        }
+         opcode::SMSG_PONG => ServerPacket::Pong {
+             sequence: read_u32_le(&mut r)?,
+         },
+diff --git a/crates/benilla-protocol/src/skate.rs b/crates/benilla-protocol/src/skate.rs
+new file mode 100644
+index 00000000..d71e9c60
+--- /dev/null
++++ b/crates/benilla-protocol/src/skate.rs
+@@ -0,0 +1,198 @@
++//! Negotiated World of Skatecraft pose extension. All numbers are little endian.
++//! A server relay prepends the authenticated sender's u64 GUID (zero for HELLO ack).
++use crate::wire::{read_f32_le, read_u16_le, read_u32_le, read_u8};
++use std::io::{self, Read};
++
++pub const CMSG_SKATE: u16 = 828;
++pub const SMSG_SKATE: u16 = 829;
++pub const MAX_BYTES: usize = 10000;
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Transform {
++    pub position: [f32; 3],
++    pub rotation: [f32; 4],
++    pub scale: [f32; 3],
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Pose {
++    pub origin: [f32; 3],
++    pub root: Transform,
++    pub bones: Vec<(String, Transform)>,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Frame {
++    /// 0: hello/ack; 1: pose; 2: stopped.
++    pub kind: u8,
++    pub sequence: u32,
++    pub map: u32,
++    pub pose: Option<Pose>,
++}
++
++fn invalid() -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, "invalid skating frame")
++}
++fn read_transform(r: &mut &[u8], bound: f32) -> io::Result<Transform> {
++    let mut values = [0.0; 10];
++    for v in &mut values {
++        *v = read_f32_le(r)?;
++    }
++    let t = Transform {
++        position: values[..3].try_into().unwrap(),
++        rotation: values[3..7].try_into().unwrap(),
++        scale: values[7..].try_into().unwrap(),
++    };
++    let norm: f32 = t.rotation.iter().map(|x| x * x).sum();
++    if values.iter().any(|x| !x.is_finite())
++        || t.position.iter().any(|x| x.abs() > bound)
++        || !(0.98..1.02).contains(&norm)
++        || t.scale.iter().any(|x| *x < 0.01 || *x > 10.0)
++    {
++        return Err(invalid());
++    }
++    Ok(t)
++}
++
++impl Frame {
++    pub fn decode(mut r: &[u8]) -> io::Result<Self> {
++        if r.len() > MAX_BYTES || read_u8(&mut r)? != 1 {
++            return Err(invalid());
++        }
++        let kind = read_u8(&mut r)?;
++        let sequence = read_u32_le(&mut r)?;
++        let map = read_u32_le(&mut r)?;
++        let pose = match kind {
++            0 | 2 => None,
++            1 => {
++                let mut origin = [0.0; 3];
++                for v in &mut origin {
++                    *v = read_f32_le(&mut r)?;
++                    if !v.is_finite() || v.abs() > 50000.0 {
++                        return Err(invalid());
++                    }
++                }
++                let root = read_transform(&mut r, 100000.0)?;
++                let count = read_u16_le(&mut r)?;
++                if count == 0 || count > 96 {
++                    return Err(invalid());
++                }
++                let mut bones = Vec::with_capacity(count as usize);
++                let mut names = std::collections::HashSet::new();
++                for _ in 0..count {
++                    let n = read_u8(&mut r)? as usize;
++                    if n == 0 || n > 48 {
++                        return Err(invalid());
++                    }
++                    let mut name = vec![0; n];
++                    r.read_exact(&mut name)?;
++                    if name
++                        .iter()
++                        .any(|b| !b.is_ascii_uppercase() && !b.is_ascii_digit() && *b != b'_')
++                    {
++                        return Err(invalid());
++                    }
++                    let name = String::from_utf8(name).map_err(|_| invalid())?;
++                    if !names.insert(name.clone()) {
++                        return Err(invalid());
++                    }
++                    bones.push((name, read_transform(&mut r, 100.0)?));
++                }
++                Some(Pose {
++                    origin,
++                    root,
++                    bones,
++                })
++            }
++            _ => return Err(invalid()),
++        };
++        if !r.is_empty() {
++            return Err(invalid());
++        }
++        Ok(Self {
++            kind,
++            sequence,
++            map,
++            pose,
++        })
++    }
++
++    pub fn encode(&self) -> io::Result<Vec<u8>> {
++        let mut b = vec![1, self.kind];
++        b.extend(self.sequence.to_le_bytes());
++        b.extend(self.map.to_le_bytes());
++        if let Some(p) = &self.pose {
++            if p.bones.len() > 96 {
++                return Err(invalid());
++            }
++            for v in p.origin {
++                b.extend(v.to_le_bytes());
++            }
++            fn put(b: &mut Vec<u8>, t: &Transform) {
++                for v in t.position.iter().chain(&t.rotation).chain(&t.scale) {
++                    b.extend(v.to_le_bytes());
++                }
++            }
++            put(&mut b, &p.root);
++            b.extend((p.bones.len() as u16).to_le_bytes());
++            for (name, t) in &p.bones {
++                if name.len() > 48 {
++                    return Err(invalid());
++                }
++                b.push(name.len() as u8);
++                b.extend(name.as_bytes());
++                put(&mut b, t);
++            }
++        }
++        Self::decode(&b)?;
++        Ok(b)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn sample() -> Frame {
++        let t = Transform {
++            position: [0.; 3],
++            rotation: [0., 0., 0., 1.],
++            scale: [1.; 3],
++        };
++        Frame {
++            kind: 1,
++            sequence: 7,
++            map: 0,
++            pose: Some(Pose {
++                origin: [0.; 3],
++                root: t.clone(),
++                bones: vec![("HIPS".into(), t)],
++            }),
++        }
++    }
++    #[test]
++    fn roundtrip_and_all_truncations() {
++        let f = sample();
++        let b = f.encode().unwrap();
++        assert_eq!(Frame::decode(&b).unwrap(), f);
++        for n in 0..b.len() {
++            assert!(Frame::decode(&b[..n]).is_err());
++        }
++        let mut trailing = b;
++        trailing.push(0);
++        assert!(Frame::decode(&trailing).is_err());
++    }
++    #[test]
++    fn rejects_bad_pose_and_layout() {
++        let mut f = sample();
++        f.pose.as_mut().unwrap().root.rotation = [0.; 4];
++        assert!(f.encode().is_err());
++        let mut f = sample();
++        f.pose.as_mut().unwrap().origin[0] = f32::NAN;
++        assert!(f.encode().is_err());
++        let mut f = sample();
++        let b = f.pose.as_ref().unwrap().bones[0].clone();
++        f.pose.as_mut().unwrap().bones.push(b);
++        assert!(f.encode().is_err());
++        assert!(Frame::decode(&vec![0; MAX_BYTES + 1]).is_err());
++    }
++}
+diff --git a/crates/benilla-protocol/src/world/writer/mod.rs b/crates/benilla-protocol/src/world/writer/mod.rs
+index 7b86b8d7..2a79f1e9 100644
+--- a/crates/benilla-protocol/src/world/writer/mod.rs
++++ b/crates/benilla-protocol/src/world/writer/mod.rs
+@@ -70,6 +70,10 @@ pub struct WorldWriter {
+ }
+ 
+ impl WorldWriter {
++    /// The negotiated skating extension; standard servers must not receive pose packets.
++    pub fn skate(&mut self, frame: &crate::skate::Frame) -> Result<()> {
++        self.send(crate::skate::CMSG_SKATE, &frame.encode()?)
++    }
+     /// Frame, encrypt and write one packet: the sole write path every verb goes through.
+     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
+         let sent = send_packet(&mut self.stream, Some(&mut self.encrypter), opcode, body);
+diff --git a/docs/skate-multiplayer.md b/docs/skate-multiplayer.md
+new file mode 100644
+index 00000000..aa77b689
+--- /dev/null
++++ b/docs/skate-multiplayer.md
+@@ -0,0 +1,37 @@
++# Multiplayer free skating
++
++The companion server is [vmangos-world-of-skatecraft](https://github.com/shaarmander/vmangos-world-of-skatecraft).
++Its SKATECRAFT.md defines protocol v1. Both sides must include this extension.
++
++Start the modified VMaNGOS world service and set `WOW_SKATE_MULTIPLAYER=1` before
++launching the client. Each client needs its own account; sharing one disconnects
++the previous session. Each player still presses J and uses their own controller.
++The custom clients display each other's full solved skeleton and separately
++animated deck, trucks and wheels. The server continues to run ordinary WoW.
++
++`skate/network.rs` publishes at 20 Hz, waits for the server handshake, buffers
++remote poses and samples 100 ms behind arrival. `rig.rs` retains a retargeting
++plan per entity; `board.rs` owns a separate skinned board for each remote entity.
++The ordinary network object remains the source of appearance and identity.
++
++This implementation trusts clients to simulate their skating. Scores, trick
++verification, shared board collisions and server-authoritative physics are outside
++this protocol. Unmodified servers should be used with the opt-in variable unset.
++
++For automated, noncombat testing only, `WOW_UNATTENDED=1 WOW_SKATE_PROBE=1`
++feeds a repeating push/crouch/ollie input sequence through the real Skate engine.
++`WOW_SKATE_AUTOSTART=5` starts riding after world entry. Use distinct probe accounts,
++separate `BENILLA_HOME` paths, `WOW_NOSOUND=1`, bounded run duration, and live
++screenshots to check appearance. Test receiving in both directions, then dismount,
++logout/reconnect and approach/departure from visibility range. Receiving packets
++alone does not establish that both the character rig and board are displayed.
++
++The Windows launcher `test-two-clients.bat` starts two locally provisioned test
++accounts with independent settings. `tools/test-skate-multiplayer.ps1 -Probe`
++runs a bounded capture and dismount/remount sequence; add `-Idle` to omit scripted
++pushes. Its local identity JSON is excluded from version control.
++
++Facing changes and normal movement are coalesced to 20 Hz while skating. This is
++necessary because physics heading jitter can otherwise flood the server with a
++SET_FACING packet on every rendered frame. Forced speed acknowledgments are still
++serviced immediately.
+diff --git a/test-two-clients.bat b/test-two-clients.bat
+new file mode 100644
+index 00000000..0633a0a1
+--- /dev/null
++++ b/test-two-clients.bat
+@@ -0,0 +1,4 @@
++@echo off
++cd /d "%~dp0"
++powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-skate-multiplayer.ps1
++if errorlevel 1 pause
+diff --git a/tools/test-skate-multiplayer.ps1 b/tools/test-skate-multiplayer.ps1
+new file mode 100644
+index 00000000..fa4fd811
+--- /dev/null
++++ b/tools/test-skate-multiplayer.ps1
+@@ -0,0 +1,61 @@
++param(
++    [switch]$Probe,
++    [switch]$Idle,
++    [int]$Seconds = 75,
++    [string]$IdentityFile = '.setup/multiplayer-test/identities.json'
++)
++$ErrorActionPreference = 'Stop'
++$clientRoot = Split-Path $PSScriptRoot -Parent
++Set-Location $clientRoot
++$identities = @(Get-Content -LiteralPath $IdentityFile | ConvertFrom-Json)
++if ($identities.Count -ne 2 -or $identities[0].user -eq $identities[1].user) {
++    throw 'Supply exactly two distinct test accounts in the identity JSON.'
++}
++$runDirectory = Join-Path $clientRoot ('.setup/multiplayer-test/run-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
++New-Item -ItemType Directory -Path $runDirectory | Out-Null
++# A copy keeps a test run from locking the normal launcher binary during development.
++Copy-Item 'target/release/benilla.exe' (Join-Path $runDirectory 'benilla.exe')
++$env:WOW_HOST = 'localhost:3725'
++$env:WOW_REALM = 'VMaNGOS'
++$env:WOW_DATA = 'C:\World of Warcraft Classic\Data'
++$env:WOW_SKATE_ASSETS = Join-Path $clientRoot 'skate-data/assets'
++$env:WOW_SKATE_AUDIO = Join-Path $clientRoot 'skate-audio'
++$env:WOW_SKATE_MULTIPLAYER = '1'
++$env:WOW_WIN = '960x540'
++$env:RUST_LOG = 'warn,benilla_app::skate=info,benilla_app::net::session=info,benilla_app::capture=info,bevy_render::view::window::screenshot=info'
++$results = @()
++for ($i=0; $i -lt 2; $i++) {
++    $identity = $identities[$i]
++    $characterDirectory = Join-Path $runDirectory $identity.character
++    New-Item -ItemType Directory -Path $characterDirectory | Out-Null
++    $env:WOW_USER = $identity.user
++    $env:WOW_PASS = $identity.password
++    $env:WOW_CHAR = $identity.character
++    $env:BENILLA_HOME = Join-Path $clientRoot ('.setup/multiplayer-test/' + $identity.character + '/config')
++    # Both accounts are deliberately separate from the user's account.
++    $env:WOW_ALLOW_ACCOUNT = '1'
++    if ($Probe) {
++        $env:WOW_UNATTENDED = '1'
++        $env:WOW_NOSOUND = '1'
++        $env:WOW_SKATE_AUTOSTART = '5'
++        $env:WOW_SKATE_PROBE = if ($Idle) { '0' } else { '1' }
++        $env:WOW_PROBE_EXIT_AT = "$Seconds"
++        $env:WOW_LIVE_SHOT = Join-Path $characterDirectory 'view.png'
++        $env:WOW_LIVE_SHOT_AT = '25'
++        $env:WOW_LIVE_SHOT_COUNT = '5'
++        $env:WOW_LIVE_SHOT_EVERY = '8'
++        $env:WOW_PROBE_CAM = '0,-22,20@5'
++        # Exercise dismount after the first captures. Input is the real J key path.
++        $env:WOW_PROBE_KEY = 'J@32;J@38'
++    } else {
++        foreach ($name in @('WOW_UNATTENDED','WOW_NOSOUND','WOW_SKATE_AUTOSTART','WOW_SKATE_PROBE','WOW_PROBE_EXIT_AT','WOW_LIVE_SHOT','WOW_LIVE_SHOT_AT','WOW_LIVE_SHOT_COUNT','WOW_LIVE_SHOT_EVERY','WOW_PROBE_CAM','WOW_PROBE_KEY')) {
++            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
++        }
++    }
++    $process = Start-Process -FilePath (Join-Path $runDirectory 'benilla.exe') -WorkingDirectory $clientRoot -PassThru `
++        -RedirectStandardOutput (Join-Path $characterDirectory 'stdout.log') `
++        -RedirectStandardError (Join-Path $characterDirectory 'stderr.log')
++    $results += [pscustomobject]@{ character=$identity.character; pid=$process.Id; directory=$characterDirectory }
++}
++$results | ConvertTo-Json | Set-Content (Join-Path $runDirectory 'processes.json')
++$results
