@@ -991,6 +991,24 @@ index 00000000..aa77b689
 +necessary because physics heading jitter can otherwise flood the server with a
 +SET_FACING packet on every rendered frame. Forced speed acknowledgments are still
 +serviced immediately.
+diff --git a/play.bat b/play.bat
+index a8c68146..48fcfc4d 100644
+--- a/play.bat
++++ b/play.bat
+@@ -10,6 +10,13 @@ if not exist target\release\benilla.exe (
+ if "%SKATECRAFT_SERVER_PROJECT%"=="" set SKATECRAFT_SERVER_PROJECT=world-of-skatecraft
+ docker compose -p %SKATECRAFT_SERVER_PROJECT% --project-directory server -f server\compose.yaml up -d
+ set WOW_HOST=localhost
++if not defined WOW_DATA (
++    set "SKATECRAFT_WOW_PATH=%~dp0WoW"
++    if exist .setup\wow-path (
++        set /p SKATECRAFT_WOW_PATH=<.setup\wow-path
++    )
++)
++if not defined WOW_DATA set "WOW_DATA=%SKATECRAFT_WOW_PATH%\Data"
+ set WOW_SKATE_ASSETS=%~dp0skate-data\assets
+ set WOW_SKATE_AUDIO=%~dp0skate-audio
+ target\release\benilla.exe %*
 diff --git a/test-two-clients.bat b/test-two-clients.bat
 new file mode 100644
 index 00000000..0633a0a1
