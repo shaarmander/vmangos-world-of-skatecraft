@@ -1003,10 +1003,10 @@ index 00000000..0633a0a1
 +if errorlevel 1 pause
 diff --git a/tools/test-skate-multiplayer.ps1 b/tools/test-skate-multiplayer.ps1
 new file mode 100644
-index 00000000..157b12ae
+index 00000000..c8dacb30
 --- /dev/null
 +++ b/tools/test-skate-multiplayer.ps1
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,64 @@
 +param(
 +    [switch]$Probe,
 +    [switch]$Idle,
@@ -1026,7 +1026,10 @@ index 00000000..157b12ae
 +Copy-Item 'target/release/benilla.exe' (Join-Path $runDirectory 'benilla.exe')
 +$env:WOW_HOST = 'localhost:3725'
 +$env:WOW_REALM = 'VMaNGOS'
-+$env:WOW_DATA = 'C:\World of Warcraft Classic\Data'
++if (-not $env:WOW_DATA) {
++    $install = (Get-Content -LiteralPath (Join-Path $clientRoot '.setup/wow-path') -Raw).Trim()
++    $env:WOW_DATA = Join-Path $install 'Data'
++}
 +$env:WOW_SKATE_ASSETS = Join-Path $clientRoot 'skate-data/assets'
 +$env:WOW_SKATE_AUDIO = Join-Path $clientRoot 'skate-audio'
 +$env:WOW_SKATE_MULTIPLAYER = '1'

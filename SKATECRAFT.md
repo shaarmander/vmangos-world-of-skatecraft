@@ -17,7 +17,9 @@ docker build -f Dockerfile.skate -t vmangos-world-of-skatecraft:5875 .
 ```
 
 Use this image for the `mangosd` service in vmangos-deploy. Retain its original
-`realmd`, database, configuration and extracted data. No SQL migrations are introduced.
+`realmd`, database and configuration. No SQL migrations are introduced.
+Extracted navigation data must match this core; see below before reusing another
+server's data files.
 The companion client patch is `client/world-of-skatecraft.patch`, generated against
 [World of Skatecraft](https://github.com/Kimmo3223/world-of-skatecraft) commit
 `da6e99bc`. In an existing working World of Skatecraft installation, apply it with
@@ -72,3 +74,25 @@ of cheat-proof skating.
 The custom client also sends normal WoW movement at 20 Hz while skating, including
 when horizontal speed is zero. This keeps spatial visibility and WoW gameplay
 position current. Ordinary walking retains the stock movement cadence.
+
+## Creature navigation and clean client data
+
+This core requires movement-map generator version 6, Detour version 7, collision
+maps `VMAP_7.0`, and terrain maps `MAPSz1.4`. CMaNGOS generator-v8 movement tiles
+are rejected even when their filenames look correct. Do not rewrite their version
+headers or disable pathfinding to hide the mismatch.
+
+Build with `-DBUILD_EXTRACTORS=ON` and install the extractors. In a fresh output
+directory, run `tools/extract-navigation.sh` with `CLIENT` pointing to a clean
+user-owned WoW 1.12.1 installation and `EXTRACTORS` pointing to the installed
+`Extractors` directory (including config.json and offmesh.txt). All output can live
+on a separate drive. Use the same clean MPQ chain for the custom client; a World
+Forge patch that replaces an ADT changes what the client sees but is not included
+in the stock server extractor's patch list.
+
+Before deployment, run `python tools/check-navigation.py <output-directory>
+--require-tile 0004832` (Northshire). Back up the active extracted-data directory
+and stop the world server before replacing it. Retain `mmap.enabled = 1` and all
+three `vmap.enable*` settings. Restart and verify `.mmap loc` resolves a polygon,
+`.mmap stats` reports loaded tiles, and a creature can chase a normal, non-GM-mode
+character. Header checks alone do not establish correct paths or rendered motion.
