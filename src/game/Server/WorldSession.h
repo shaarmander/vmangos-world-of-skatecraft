@@ -50,6 +50,7 @@
 #include "Packets/Loot.h"
 #include "Packets/Mail.h"
 #include "Packets/Misc.h"
+#include "Packets/Skate.h"
 #include "Packets/Movement.h"
 #include "Packets/Npc.h"
 #include "Packets/Pet.h"
@@ -522,6 +523,12 @@ class WorldSession
         void HandleShowingHelmOpcode(NullClientPacket const& packet);
         void HandleShowingCloakOpcode(NullClientPacket const& packet);
         void HandleRepairItemOpcode(WorldPackets::Npc::RepairItem const& packet);
+
+        bool m_skateEnabled = false, m_skateActive = false;
+        uint32 m_skateTime = 0, m_skateSequence = 0;
+        float m_skateX = 0, m_skateY = 0, m_skateZ = 0;
+        bool IsSkating() const;
+        void HandleSkate(SkatePacket const& packet);
 
         void HandlePingOpcode(WorldPacket& recvPacket);
         void HandleAuthSessionOpcode(WorldPacket& recvPacket);

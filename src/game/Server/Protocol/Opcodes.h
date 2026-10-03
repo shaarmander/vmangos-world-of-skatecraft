@@ -159,7 +159,7 @@ struct OpcodeHandler
 };
 
 // returns true if it's completely out of range
-inline bool IsDefinitelyBogusOpcode(uint16 opcode) { return opcode >= NUM_MSG_TYPES; }
+inline bool IsDefinitelyBogusOpcode(uint16 opcode) { return opcode >= SKATE_OPCODE_COUNT; }
 
 // Will work for any opcode, might return `<unknown opcode>` and without impl
 OpcodeHandler const& LookupOpcodeHandler(uint16 id);

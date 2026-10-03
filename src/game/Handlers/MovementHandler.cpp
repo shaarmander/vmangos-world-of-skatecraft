@@ -312,13 +312,19 @@ void WorldSession::HandleMovementOpcodes(WorldPackets::Movement::MovementPacket 
     if (pPlayerMover && pPlayerMover->IsBeingTeleported())
         return;
 
+    if (IsSkating() && pPlayerMover == _player) {
+        auto const& pos = packet.movementInfo.pos;
+        float dx = pos.x-m_skateX, dy = pos.y-m_skateY, dz = pos.z-m_skateZ;
+        if (dx*dx + dy*dy + dz*dz > 400.0f) return;
+    }
+
     if (!VerifyMovementInfo(packet.movementInfo))
         return;
 
     if (pPlayerMover)
     {
         if ((m_moveRejectTime = _player->GetCheatData()->HandleFlagTests(pPlayerMover, const_cast<MovementInfo&>(packet.movementInfo), opcode)) ||
-            (m_moveRejectTime = _player->GetCheatData()->HandlePositionTests(pPlayerMover, const_cast<MovementInfo&>(packet.movementInfo), opcode)))
+            (!IsSkating() && (m_moveRejectTime = _player->GetCheatData()->HandlePositionTests(pPlayerMover, const_cast<MovementInfo&>(packet.movementInfo), opcode))))
         {
             return;
         }

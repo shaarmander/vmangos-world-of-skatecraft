@@ -1,0 +1,13 @@
+# Build the fork against the same Ubuntu/runtime generation as the deployed realm.
+FROM ubuntu:26.04 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates cmake git libcurl4-openssl-dev \
+    libmysqlclient-dev libssl-dev zlib1g-dev
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/vmangos \
+    -DBUILD_FOR_HOST_CPU=0 -DBUILD_EXTRACTORS=0 -DENABLE_MAILSENDER=1 \
+    -DENABLE_CPPTRACE=0 -DSUPPORTED_CLIENT_BUILD=5875 -DDEBUG_SYMBOLS=0 && \
+    cmake --build build -j 6
+FROM ghcr.io/mserajnik/vmangos-server@sha256:9b314a39fcdfed72eac81dc089270345e6fb75f348cbf0c5dd2592d3ca1bcf3f
+COPY --from=build --chown=1000:1000 /src/build/src/mangosd/mangosd /opt/vmangos/bin/mangosd

@@ -1,3 +1,8 @@
+# vmangos-world-of-skatecraft
+
+Multiplayer skating on VMaNGOS, with full character and board pose replication.
+See [SKATECRAFT.md](SKATECRAFT.md) for the build, companion client patch and wire protocol.
+
 [![CI Build](https://github.com/vmangos/core/actions/workflows/ci-build.yaml/badge.svg)](https://github.com/vmangos/core/actions/workflows/ci-build.yaml)
 
 

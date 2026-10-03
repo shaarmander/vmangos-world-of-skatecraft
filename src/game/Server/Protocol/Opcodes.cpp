@@ -28,7 +28,7 @@
 struct Handlers
 {
     // TODO: Change to sparse vector or map<> for 1.13+
-    OpcodeHandler handlers[NUM_MSG_TYPES];
+    OpcodeHandler handlers[SKATE_OPCODE_COUNT];
 };
 
 template<typename T>
@@ -66,6 +66,9 @@ Handlers BuildOpcodeList()
         ref.name = #opcode; \
         ref.impl = nonstd::make_unexpected((reason)); \
     }
+
+    DEFINE_HANDLER(CMSG_SKATE, STATUS_LOGGEDIN, PACKET_PROCESS_WORLD, &WorldSession::HandleSkate);
+    INVALID_PACKET(SMSG_SKATE, UnhandleReason::SendByServer);
 
     // Correspondence between opcodes and their names
     INVALID_PACKET(MSG_NULL_ACTION,                   UnhandleReason::Invalid);
@@ -950,7 +953,7 @@ OpcodeHandler emptyHandler;
 
 OpcodeHandler const& LookupOpcodeHandler(uint16 id)
 {
-    if (id >= NUM_MSG_TYPES)
+    if (id >= SKATE_OPCODE_COUNT)
         return emptyHandler;
     return handlerList.handlers[id];
 }
